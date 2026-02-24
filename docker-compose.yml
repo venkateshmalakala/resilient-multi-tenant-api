@@ -15,6 +15,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s # Added to give the Node process time to boot
 
   db:
     image: postgres:13

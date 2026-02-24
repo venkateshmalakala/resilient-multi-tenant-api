@@ -13,7 +13,7 @@ Instead of a single shared pool, this application partitions resources into thre
   - **Pro:** 20 max connections.
   - **Enterprise:** 50 max connections.
 
-- **Logic Bulkheads:** Requests are processed through isolated circuit breakers. If the database slows down for the "Free" tier, only that tier's breaker trips.
+- **Logic Bulkheads:** Requests are processed through isolated worker thread pools (using `piscina`) to ensure that heavy computation or slow requests in one tier do not block another. Each tier's pool is wrapped in an independent circuit breaker (`opossum`) that monitors for failures. If the database slows down for the "Free" tier, only that tier's breaker will trip.
 
 ### 2. Resilience Features
 
