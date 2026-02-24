@@ -1,92 +1,94 @@
+
 # Multi-Tenant Resilient API (Bulkhead Pattern)
 
-This project implements a highly resilient, multi-tenant REST API built with Node.js, Express, and PostgreSQL. The core objective is to demonstrate the Bulkhead Pattern, ensuring that resource exhaustion or service failures in one tenant tier do not impact the performance or availability of others.
+This project implements a highly resilient, multi-tenant REST API built with Node.js, Express, and PostgreSQL. The core objective is to demonstrate the **Bulkhead Pattern**, ensuring that resource exhaustion or service failures in one tenant tier do not impact the performance or availability of others.
 
-## Architecture & Design Choices
+---
+
+## 🏗️ Architecture & Design Choices
 
 ### 1. Resource Isolation (The Bulkheads)
+The application partitions resources into three distinct "compartments" based on the `X-Tenant-Tier` header.
 
-Instead of a single shared pool, this application partitions resources into three distinct "compartments" based on the `X-Tenant-Tier` header:
+| Tier | DB Connections (Max) | Rate Limit | Thread Pool Size |
+| :--- | :--- | :--- | :--- |
+| **free** | 5 | 100 req/min | 10 threads |
+| **pro** | 20 | 1,000 req/min | 30 threads |
+| **enterprise** | 50 | Unlimited | 60 threads |
 
-- **Database Bulkheads:** Three independent `pg.Pool` instances are initialized.
-  - **Free:** 5 max connections.
-  - **Pro:** 20 max connections.
-  - **Enterprise:** 50 max connections.
+- **Database Bulkheads:** Three independent `pg.Pool` instances ensure a connection leak in one tier cannot prevent other tiers from connecting.
+- **Logic Bulkheads:** Requests are processed through isolated worker thread pools (using `piscina`) to ensure heavy computation in one tier does not block another.
+- **Circuit Breakers:** Powered by `opossum`. They monitor failure rates and "fail fast" when a specific tier becomes unstable.
 
-- **Logic Bulkheads:** Requests are processed through isolated worker thread pools (using `piscina`) to ensure that heavy computation or slow requests in one tier do not block another. Each tier's pool is wrapped in an independent circuit breaker (`opossum`) that monitors for failures. If the database slows down for the "Free" tier, only that tier's breaker will trip.
+---
 
-### 2. Resilience Features
-
-- **Rate Limiting:** Implemented via `rate-limiter-flexible`.
-  - **Free:** 100 requests / minute.
-  - **Pro:** 1,000 requests / minute.
-  - **Enterprise:** Unlimited.
-
-- **Circuit Breakers:** Powered by Opossum. They monitor failure rates and "fail fast" when a specific tier becomes unstable.
-
-- **Health Monitoring:** A dedicated `/metrics/bulkheads` endpoint provides real-time visibility into the health of each resource pool.
-
-## Getting Started
+## 🚀 Getting Started
 
 ### Prerequisites
-
 - Docker and Docker Compose
-- Git Bash (if on Windows) or a Terminal (Linux/macOS)
+- Git Bash (Windows) or Terminal (Linux/macOS)
 
 ### Running the Application
+1. Clone the repository.
+2. Start the stack:
+   ```bash
+   docker-compose up --build
 
-1.  Clone the repository.
-2.  Start the stack:
-    ```bash
-    docker-compose up --build
-    ```
-3.  Verify Health:
-    The API is healthy when `http://localhost:8080/health` returns `{"status": "healthy"}`.
+```
 
-## Testing & Verification
+---
+
+## 🧐 What to expect after startup
+
+Once the containers are running, you should see the following sequence in your logs:
+
+1. **Database Ready**: The `db` container initializes the schema and seed data.
+2. **API Live**: The API service boots up and reports:
+`Resilient API running on port 8080`.
+3. **Health Check**: Verify the status at `http://localhost:8080/health`. It should return `{"status": "healthy"}`.
+
+---
+
+## 🧪 Testing & Verification
 
 ### 1. Manual Metric Check
 
-View the current state of all bulkheads:
+View the real-time state of all bulkheads, thread pools, and circuit breakers:
 
 ```bash
 curl http://localhost:8080/metrics/bulkheads
+
 ```
 
-### 2. Automated Load Test
+### 2. Automated Load Test (Bulkhead Proof)
 
-The included `load-test.sh` demonstrates resource isolation. It floods the `free` tier to trigger rate limits and failures while verifying that the `enterprise` tier remains unaffected.
-
-To run the test:
+This script floods the `free` tier to trigger rate limits while verifying that the `enterprise` tier remains unaffected.
 
 ```bash
-# Using Docker (Works on Windows/Linux/macOS)
 docker compose exec api bash ./load-test.sh
+
 ```
 
 ### 3. Circuit Breaker Trigger
 
-To manually trip the circuit breaker for the `free` tier without affecting `pro` or `enterprise`:
-
-Send 10 consecutive requests with the failure flag:
+To manually trip the circuit breaker for the `free` tier without affecting other tiers, send 10 consecutive requests with the failure flag:
 
 ```bash
-# Run this 10 times
-curl -H "X-Tenant-Tier: free" "http://localhost:8080/api/data?force_error=true"
+for i in {1..10}; do curl -H "X-Tenant-Tier: free" "http://localhost:8080/api/data?force_error=true"; done
+
 ```
 
 Check metrics again. You will see `free.circuitBreaker.state: "OPEN"`, while other tiers remain `"CLOSED"`.
 
-## Configuration
+---
 
-Environment variables are managed in `.env`. Refer to `.env.example` for the required keys:
+## 📁 Project Structure
 
-- `DATABASE_URL`: Connection string for PostgreSQL.
-- `API_PORT`: Port the service listens on (default: 8080).
+* `server.js`: Main application logic containing bulkhead and circuit breaker implementation.
+* `worker.js`: Logic executed within isolated thread pools.
+* `init-db.sql`: Schema and seed data for the PostgreSQL container.
+* `load-test.sh`: Script for performance and isolation verification.
 
-## Project Structure
+```
 
-- `server.js`: Main application logic containing bulkhead and circuit breaker implementation.
-- `init-db.sql`: Schema and seed data for the PostgreSQL container.
-- `docker-compose.yml`: Orchestrates the API and DB services.
-- `load-test.sh`: Bash script for performance and isolation verification.
+```
