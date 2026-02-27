@@ -9,14 +9,14 @@ const app = express();
 const PORT = process.env.API_PORT || 8080;
 
 // --- 1. Database Connection Pools (Data Bulkheads) ---
+// Independent configurations and pools for each tier to ensure resource isolation.
 const poolConfigs = {
   free: { connectionString: process.env.DATABASE_URL, max: 5 },
   pro: { connectionString: process.env.DATABASE_URL, max: 20 },
   enterprise: { connectionString: process.env.DATABASE_URL, max: 50 }
 };
 
-// We create lightweight pg pools here mainly to inspect their state for metrics.
-// The actual query execution will happen inside the worker threads.
+// These pools are primarily used for health/metric inspection in this process.
 const metricsPools = {
   free: new Pool(poolConfigs.free),
   pro: new Pool(poolConfigs.pro),
@@ -24,6 +24,7 @@ const metricsPools = {
 };
 
 // --- 2. Worker Thread Pools (Logic Bulkheads) ---
+// Using Piscina to isolate heavy logic and database execution into separate thread pools.
 const workerPath = path.resolve(__dirname, 'worker.js');
 const threadPools = {
   free: new Piscina({
@@ -41,14 +42,14 @@ const threadPools = {
 };
 
 // --- 3. Rate Limiters (Traffic Isolation) ---
+// Tiered rate limiting to prevent one tier from exhausting server resources.
 const limiters = {
   free: new RateLimiterMemory({ points: 100, duration: 60 }),
   pro: new RateLimiterMemory({ points: 1000, duration: 60 })
 };
 
 // --- 4. Circuit Breakers ---
-// This function will be wrapped by the circuit breaker.
-// It runs the database query in the appropriate worker thread pool.
+// Helper function to run queries within the isolated worker pools.
 const runQueryInWorker = (tier, forceError) => {
   const workerData = {
     tier,
@@ -58,8 +59,9 @@ const runQueryInWorker = (tier, forceError) => {
   return threadPools[tier].run(workerData);
 };
 
+// Updated to correctly pass the forceError parameter to the worker via the breaker.
 const createBreaker = (tier) => {
-  return new CircuitBreaker(() => runQueryInWorker(tier, null), { // Pass a clean function
+  return new CircuitBreaker((forceError) => runQueryInWorker(tier, forceError), { 
     timeout: 3000,
     errorThresholdPercentage: 50,
     resetTimeout: 10000,
@@ -80,31 +82,33 @@ app.get('/api/data', async (req, res) => {
   const tier = req.headers['x-tenant-tier'];
   const forceError = req.query.force_error;
 
+  // Validate that a valid tier header is provided.
   if (!threadPools[tier]) {
     return res.status(400).json({ error: "Missing or invalid X-Tenant-Tier header" });
   }
 
-  // 1. Apply Rate Limiting
+  // 1. Apply Rate Limiting.
   if (limiters[tier]) {
     try {
-      await limiters[tier].consume(req.ip); // Use IP for rate limiting
+      await limiters[tier].consume(req.ip);
     } catch (err) {
       return res.status(429).json({ error: "Too Many Requests" });
     }
   }
 
-  // 2. Execute through Circuit Breaker and Worker Pool
+  // 2. Execute through Circuit Breaker and Worker Pool.
   try {
-    // The circuit breaker now calls a function that uses the correct worker pool.
-    // We pass the forceError flag directly to the underlying function for testing.
-    const data = await breakers[tier].fire(tier, forceError);
+    // Pass forceError into fire() so the breaker can pass it to the worker.
+    const data = await breakers[tier].fire(forceError);
     res.json(data);
   } catch (err) {
+    // Return 503 if the breaker is open, otherwise a standard 500.
     const status = breakers[tier].opened ? 503 : 500;
     res.status(status).json({ error: err.message || "Service Unavailable" });
   }
 });
 
+// Metrics endpoint to monitor the health of all bulkheads and breakers.
 app.get('/metrics/bulkheads', (req, res) => {
   const metrics = {};
   ['free', 'pro', 'enterprise'].forEach(tier => {
@@ -114,14 +118,12 @@ app.get('/metrics/bulkheads', (req, res) => {
 
     metrics[tier] = {
       connectionPool: {
-        // These stats from 'pg' reflect connections made from workers
         active: pool.totalCount - pool.idleCount,
         idle: pool.idleCount,
         pending: pool.waitingCount,
         max: poolConfigs[tier].max
       },
       threadPool: {
-        // Real-time metrics from Piscina
         active: threadPool.threads.length,
         queued: threadPool.queueSize,
         poolSize: threadPool.options.maxThreads
@@ -139,4 +141,4 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`Resilient API running on port ${PORT}`);
 });
 
-module.exports = app; // For testing
+module.exports = app;
