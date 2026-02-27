@@ -1,33 +1,25 @@
-const { parentPort, workerData } = require('worker_threads');
 const { Pool } = require('pg');
 
 /**
- * This function is executed in a worker thread.
- * It simulates a database failure if forceError is true,
- * otherwise it connects to the database and fetches data for the given tier.
+ * Piscina passes the data sent via threadPool.run(data) 
+ * directly as the first argument to the exported function.
  */
-async function handleRequest() {
-  const { tier, forceError, config } = workerData;
-
+module.exports = async ({ tier, forceError, config }) => {
   // Simulate a failure if requested, to test circuit breakers
   if (forceError === 'true') {
     throw new Error("Database Failure Simulated");
   }
 
+  // Initialize the pool with the tier-specific config
   const pool = new Pool(config);
   const client = await pool.connect();
+  
   try {
     const res = await client.query('SELECT * FROM tenant_data WHERE tier = $1', [tier]);
     return res.rows;
   } finally {
     client.release();
-    await pool.end(); // Ensure the pool is closed to prevent leaks in the worker
+    // Ensure the pool is closed within the worker to prevent resource leaks
+    await pool.end(); 
   }
-}
-
-handleRequest()
-  .then(result => parentPort.postMessage(result))
-  .catch(err => {
-    // Re-throw the error so Piscina can catch it and handle it appropriately
-    throw err;
-  });
+};
